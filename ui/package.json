@@ -56,7 +56,8 @@
     "react-markdown": "^10.1.0",
     "react-router-dom": "^7.1.5",
     "remark-gfm": "^4.0.1",
-    "tailwind-merge": "^3.4.1"
+    "tailwind-merge": "^3.4.1",
+    "@paperclipai/adapter-ollama-local": "workspace:*"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.0.7",
