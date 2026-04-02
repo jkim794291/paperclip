@@ -40,7 +40,7 @@ import {
 } from "./agent-config-primitives";
 import { defaultCreateValues } from "./agent-config-defaults";
 import { getUIAdapter } from "../adapters";
-import { ClaudeLocalAdvancedFields } from "../adapters/claude-local/config-fields";
+import { ClaudeLocalAdvancedFields, ClaudeLocalOllamaFields } from "../adapters/claude-local/config-fields";
 import { MarkdownEditor } from "./MarkdownEditor";
 import { ChoosePathButton } from "./PathInstructionsModal";
 import { OpenCodeLogoIcon } from "./OpenCodeLogoIcon";
@@ -819,6 +819,9 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
               )}
               {adapterType === "claude_local" && (
                 <ClaudeLocalAdvancedFields {...adapterFieldProps} />
+              )}
+              {adapterType === "claude_local" && (
+                <ClaudeLocalOllamaFields {...adapterFieldProps} />
               )}
 
               <Field label="Extra args (comma-separated)" hint={help.extraArgs}>
