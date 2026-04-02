@@ -116,6 +116,48 @@ function anthropicToOllamaMessages(req: AnthropicRequest): OllamaMessage[] {
   }
 
   for (const msg of req.messages) {
+    const blocks = Array.isArray(msg.content) ? msg.content : null;
+
+    // If this is a user message containing tool_result blocks, convert each to
+    // a "tool" role message so Ollama can properly correlate tool calls to results.
+    if (msg.role === "user" && blocks && blocks.every((b) => b.type === "tool_result")) {
+      for (const b of blocks) {
+        if (b.type === "tool_result") {
+          const resultText =
+            typeof b.content === "string" ? b.content : contentToString(b.content);
+          messages.push({ role: "tool", content: resultText });
+        }
+      }
+      continue;
+    }
+
+    // For mixed user messages (text + tool_results) or assistant messages, convert normally.
+    // Assistant messages may have both text and tool_use blocks — emit the text portion only;
+    // Ollama reconstructs tool_calls from its own prior response tracking.
+    if (msg.role === "assistant" && blocks) {
+      const textParts = blocks
+        .filter((b) => b.type === "text")
+        .map((b) => (b.type === "text" ? b.text : ""))
+        .filter(Boolean);
+      const toolCalls = blocks
+        .filter((b) => b.type === "tool_use")
+        .map((b) => {
+          if (b.type !== "tool_use") return null;
+          return {
+            function: {
+              name: b.name,
+              arguments: b.input as Record<string, unknown>,
+            },
+          };
+        })
+        .filter((tc): tc is NonNullable<typeof tc> => tc !== null);
+
+      const assistantMsg: OllamaMessage = { role: "assistant", content: textParts.join("\n") };
+      if (toolCalls.length > 0) assistantMsg.tool_calls = toolCalls;
+      messages.push(assistantMsg);
+      continue;
+    }
+
     messages.push({ role: msg.role, content: contentToString(msg.content) });
   }
 
