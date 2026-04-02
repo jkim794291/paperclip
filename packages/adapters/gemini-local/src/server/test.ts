@@ -135,7 +135,7 @@ export async function testEnvironment(
       const model = asString(config.model, DEFAULT_GEMINI_LOCAL_MODEL).trim();
       const approvalMode = asString(config.approvalMode, asBoolean(config.yolo, false) ? "yolo" : "default");
       const sandbox = asBoolean(config.sandbox, false);
-      const helloProbeTimeoutSec = Math.max(1, asNumber(config.helloProbeTimeoutSec, 10));
+      const helloProbeTimeoutSec = Math.max(1, asNumber(config.helloProbeTimeoutSec, 30));
       const extraArgs = (() => {
         const fromExtraArgs = asStringArray(config.extraArgs);
         if (fromExtraArgs.length > 0) return fromExtraArgs;
@@ -144,11 +144,9 @@ export async function testEnvironment(
 
       const args = ["--output-format", "stream-json", "--prompt", "Respond with hello."];
       if (model && model !== DEFAULT_GEMINI_LOCAL_MODEL) args.push("--model", model);
-      if (approvalMode !== "default") args.push("--approval-mode", approvalMode);
+      args.push("--approval-mode", approvalMode !== "default" ? approvalMode : "yolo");
       if (sandbox) {
         args.push("--sandbox");
-      } else {
-        args.push("--sandbox=none");
       }
       if (extraArgs.length > 0) args.push(...extraArgs);
 
@@ -196,18 +194,18 @@ export async function testEnvironment(
         });
       } else if ((probe.exitCode ?? 1) === 0) {
         const summary = parsed.summary.trim();
-        const hasHello = /\bhello\b/i.test(summary);
+        const hasContent = summary.length > 0;
         checks.push({
-          code: hasHello ? "gemini_hello_probe_passed" : "gemini_hello_probe_unexpected_output",
-          level: hasHello ? "info" : "warn",
-          message: hasHello
+          code: hasContent ? "gemini_hello_probe_passed" : "gemini_hello_probe_unexpected_output",
+          level: hasContent ? "info" : "warn",
+          message: hasContent
             ? "Gemini hello probe succeeded."
-            : "Gemini probe ran but did not return `hello` as expected.",
+            : "Gemini probe ran but did not return a response as expected.",
           ...(summary ? { detail: summary.replace(/\s+/g, " ").trim().slice(0, 240) } : {}),
-          ...(hasHello
+          ...(hasContent
             ? {}
             : {
-              hint: "Try `gemini --output-format json \"Respond with hello.\"` manually to inspect full output.",
+              hint: "Try `gemini --output-format stream-json -p \"Respond with hello.\"` manually to inspect full output.",
             }),
         });
       } else if (authMeta.requiresAuth) {

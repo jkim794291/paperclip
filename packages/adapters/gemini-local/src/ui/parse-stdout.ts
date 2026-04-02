@@ -195,15 +195,16 @@ function readSessionId(parsed: Record<string, unknown>): string {
 }
 
 function readUsage(parsed: Record<string, unknown>) {
-  const usage = asRecord(parsed.usage) ?? asRecord(parsed.usageMetadata);
+  const statsRaw = asRecord(parsed.stats);
+  const usage = asRecord(parsed.usage) ?? asRecord(parsed.usageMetadata) ?? statsRaw;
   const usageMetadata = asRecord(usage?.usageMetadata);
   const source = usageMetadata ?? usage ?? {};
   return {
-    inputTokens: asNumber(source.input_tokens, asNumber(source.inputTokens, asNumber(source.promptTokenCount))),
+    inputTokens: asNumber(source.input_tokens, asNumber(source.inputTokens, asNumber(source.promptTokenCount, asNumber(source.input)))),
     outputTokens: asNumber(source.output_tokens, asNumber(source.outputTokens, asNumber(source.candidatesTokenCount))),
     cachedTokens: asNumber(
       source.cached_input_tokens,
-      asNumber(source.cachedInputTokens, asNumber(source.cachedContentTokenCount)),
+      asNumber(source.cachedInputTokens, asNumber(source.cachedContentTokenCount, asNumber(source.cached))),
     ),
   };
 }
@@ -215,6 +216,11 @@ export function parseGeminiStdoutLine(line: string, ts: string): TranscriptEntry
   }
 
   const type = asString(parsed.type);
+
+  if (type === "init") {
+    const sessionId = readSessionId(parsed);
+    return [{ kind: "init", ts, model: asString(parsed.model, "gemini"), sessionId }];
+  }
 
   if (type === "system") {
     const subtype = asString(parsed.subtype);
@@ -233,6 +239,22 @@ export function parseGeminiStdoutLine(line: string, ts: string): TranscriptEntry
     return parseAssistantMessage(parsed.message, ts);
   }
 
+  if (type === "message") {
+    const role = asString(parsed.role);
+    if (role === "assistant") {
+      const content = parsed.content;
+      if (typeof content === "string") {
+        const text = content.trim();
+        return text ? [{ kind: "assistant", ts, text }] : [];
+      }
+      return parseAssistantMessage(content, ts);
+    }
+    if (role === "user") {
+      return collectTextEntries(parsed.content, ts, "user");
+    }
+    return [];
+  }
+
   if (type === "user") {
     return collectTextEntries(parsed.message, ts, "user");
   }
@@ -248,7 +270,9 @@ export function parseGeminiStdoutLine(line: string, ts: string): TranscriptEntry
 
   if (type === "result") {
     const usage = readUsage(parsed);
-    const errors = parsed.is_error === true
+    const status = asString(parsed.status).toLowerCase();
+    const isError = parsed.is_error === true || asString(parsed.subtype).toLowerCase() === "error" || status === "error";
+    const errors = isError
       ? [errorText(parsed.error ?? parsed.message ?? parsed.result)].filter(Boolean)
       : [];
     return [{
@@ -259,8 +283,8 @@ export function parseGeminiStdoutLine(line: string, ts: string): TranscriptEntry
       outputTokens: usage.outputTokens,
       cachedTokens: usage.cachedTokens,
       costUsd: asNumber(parsed.total_cost_usd, asNumber(parsed.cost_usd, asNumber(parsed.cost))),
-      subtype: asString(parsed.subtype, "result"),
-      isError: parsed.is_error === true,
+      subtype: asString(parsed.subtype, asString(parsed.status, "result")),
+      isError,
       errors,
     }];
   }
