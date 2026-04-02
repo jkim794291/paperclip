@@ -69,6 +69,8 @@ import {
 } from "@paperclipai/adapter-pi-local";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { readFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import {
   execute as hermesExecute,
   testEnvironment as hermesTestEnvironmentBase,
@@ -104,38 +106,73 @@ async function hasCompatiblePython(candidates: string[]): Promise<boolean> {
 }
 
 /**
- * Wraps hermesTestEnvironment to downgrade the Python version error to a
- * warning when a compatible Python (3.10+) is available under a different
- * executable name (e.g. python3.11, python3.12). This handles the case where
- * the system `python3` is an older Apple-supplied 3.9 while a newer Python is
- * installed via uv / pyenv / brew but not symlinked as `python3`.
+ * Returns true when ~/.hermes/config.yaml (or HERMES_HOME/config.yaml) has a
+ * custom model base_url configured, indicating a local/self-hosted provider
+ * that doesn't require a cloud API key.
+ */
+async function hermesHasCustomProvider(): Promise<boolean> {
+  const hermesHome = process.env.HERMES_HOME ?? `${homedir()}/.hermes`;
+  try {
+    const yaml = await readFile(`${hermesHome}/config.yaml`, "utf-8");
+    // Simple check: look for a non-empty base_url under the model section.
+    return /^\s*base_url:\s*https?:\/\/.+/m.test(yaml);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Wraps hermesTestEnvironment to:
+ * 1. Downgrade the Python version error when python3.11+ is available under a
+ *    versioned name (handles macOS shipping old system python3).
+ * 2. Downgrade the "no API keys" warning when Hermes is configured to use a
+ *    local/custom provider (e.g. Ollama) that doesn't need cloud keys.
  */
 async function hermesTestEnvironment(ctx: AdapterEnvironmentTestContext) {
   const result = await hermesTestEnvironmentBase(ctx);
-  const pythonErrorIdx = result.checks.findIndex(
+  const checks = [...result.checks];
+
+  // ── 1. Python version check ────────────────────────────────────────────────
+  const pythonErrorIdx = checks.findIndex(
     (c) => c.code === "hermes_python_old" && c.level === "error",
   );
-  if (pythonErrorIdx === -1) return result;
+  if (pythonErrorIdx !== -1) {
+    const compat = await hasCompatiblePython(["python3.13", "python3.12", "python3.11", "python3.10"]);
+    if (compat) {
+      checks[pythonErrorIdx] = {
+        ...checks[pythonErrorIdx],
+        level: "info",
+        message: checks[pythonErrorIdx].message.replace(
+          "— Hermes requires Python 3.10+",
+          "as system python3; a compatible Python 3.10+ is available via python3.11+",
+        ),
+        hint: "Hermes is running on a compatible Python. The system python3 symlink is outdated but will not affect execution.",
+      };
+    }
+  }
 
-  const compat = await hasCompatiblePython(["python3.13", "python3.12", "python3.11", "python3.10"]);
-  if (!compat) return result;
+  // ── 2. No API keys warning when using a local/custom provider ────────────
+  const noKeysIdx = checks.findIndex(
+    (c) => c.code === "hermes_no_api_keys" && c.level === "warn",
+  );
+  if (noKeysIdx !== -1) {
+    const hasCustom = await hermesHasCustomProvider();
+    if (hasCustom) {
+      checks[noKeysIdx] = {
+        ...checks[noKeysIdx],
+        level: "info",
+        message: "No cloud API keys set — Hermes is configured to use a local/custom provider.",
+        hint: "Set ANTHROPIC_API_KEY etc. only if you want to use a cloud provider instead of your local Ollama/custom endpoint.",
+      };
+    }
+  }
 
-  // Compatible Python found — downgrade to info so it doesn't block the agent.
-  result.checks[pythonErrorIdx] = {
-    ...result.checks[pythonErrorIdx],
-    level: "info",
-    message: result.checks[pythonErrorIdx].message.replace(
-      "— Hermes requires Python 3.10+",
-      "as system python3; a compatible Python 3.10+ is available via python3.11+",
-    ),
-    hint: "Hermes is running on a compatible Python. The system python3 symlink is outdated but will not affect execution.",
-  };
-
-  // Re-evaluate overall status without the Python error.
-  const hasErrors = result.checks.some((c) => c.level === "error");
-  const hasWarnings = result.checks.some((c) => c.level === "warn");
+  // Re-evaluate overall status.
+  const hasErrors = checks.some((c) => c.level === "error");
+  const hasWarnings = checks.some((c) => c.level === "warn");
   return {
     ...result,
+    checks,
     status: (hasErrors ? "fail" : hasWarnings ? "warn" : "pass") as typeof result.status,
   };
 }
