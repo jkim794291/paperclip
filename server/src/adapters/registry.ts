@@ -72,14 +72,14 @@ import { promisify } from "node:util";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import {
-  execute as hermesExecute,
+  execute as hermesExecuteBase,
   testEnvironment as hermesTestEnvironmentBase,
   sessionCodec as hermesSessionCodec,
   listSkills as hermesListSkills,
   syncSkills as hermesSyncSkills,
   detectModel as detectModelFromHermes,
 } from "hermes-paperclip-adapter/server";
-import type { AdapterEnvironmentTestContext } from "@paperclipai/adapter-utils";
+import type { AdapterEnvironmentTestContext, AdapterExecutionContext } from "@paperclipai/adapter-utils";
 import {
   agentConfigurationDoc as hermesAgentConfigurationDoc,
   models as hermesModels,
@@ -176,6 +176,87 @@ async function hermesTestEnvironment(ctx: AdapterEnvironmentTestContext) {
     status: (hasErrors ? "fail" : hasWarnings ? "warn" : "pass") as typeof result.status,
   };
 }
+
+/**
+ * Safe prompt template that avoids `curl | python3 -c` patterns which trigger
+ * Hermes's Tirith security scanner. The LLM can parse raw JSON responses
+ * directly, so python3 post-processing is not needed.
+ */
+const HERMES_SAFE_PROMPT_TEMPLATE = `You are "{{agentName}}", an AI agent employee in a Paperclip-managed company.
+
+IMPORTANT: Use the \`terminal\` tool with \`curl\` for ALL Paperclip API calls (web_extract and browser cannot access localhost).
+
+Your Paperclip identity:
+  Agent ID: {{agentId}}
+  Company ID: {{companyId}}
+  API Base: {{paperclipApiUrl}}
+
+{{#taskId}}
+## Assigned Task
+
+Issue ID: {{taskId}}
+Title: {{taskTitle}}
+
+{{taskBody}}
+
+## Workflow
+
+1. Work on the task using your tools
+2. When done, mark the issue as completed:
+   \`curl -s -X PATCH "{{paperclipApiUrl}}/issues/{{taskId}}" -H "Content-Type: application/json" -d '{"status":"done"}'\`
+3. Post a completion comment on the issue summarizing what you did:
+   \`curl -s -X POST "{{paperclipApiUrl}}/issues/{{taskId}}/comments" -H "Content-Type: application/json" -d '{"body":"DONE: <your summary here>"}'\`
+4. If this issue has a parent, post a brief notification on the parent issue:
+   \`curl -s -X POST "{{paperclipApiUrl}}/issues/PARENT_ISSUE_ID/comments" -H "Content-Type: application/json" -d '{"body":"{{agentName}} completed {{taskId}}. Summary: <brief>"}'\`
+{{/taskId}}
+
+{{#commentId}}
+## Comment on This Issue
+
+Someone commented. Read it:
+   \`curl -s "{{paperclipApiUrl}}/issues/{{taskId}}/comments/{{commentId}}"\`
+
+Address the comment, POST a reply if needed, then continue working.
+{{/commentId}}
+
+{{#noTask}}
+## Heartbeat Wake — Check for Work
+
+1. List ALL open issues assigned to you (todo, backlog, in_progress):
+   \`curl -s "{{paperclipApiUrl}}/companies/{{companyId}}/issues?assigneeAgentId={{agentId}}"\`
+   Read the JSON response and filter for issues where status is not done or cancelled.
+
+2. If issues found, pick the highest priority one and work on it:
+   - Read the issue details: \`curl -s "{{paperclipApiUrl}}/issues/ISSUE_ID"\`
+   - Do the work in the project directory: {{projectName}}
+   - When done, mark complete and post a comment (see Workflow steps 2-4 above)
+
+3. If no issues assigned to you, check for unassigned issues:
+   \`curl -s "{{paperclipApiUrl}}/companies/{{companyId}}/issues?status=backlog"\`
+   Read the JSON and look for issues with no assigneeAgentId.
+   If you find a relevant issue, assign it to yourself:
+   \`curl -s -X PATCH "{{paperclipApiUrl}}/issues/ISSUE_ID" -H "Content-Type: application/json" -d '{"assigneeAgentId":"{{agentId}}","status":"todo"}'\`
+
+4. If truly nothing to do, report briefly what you checked.
+{{/noTask}}`;
+
+/**
+ * Wraps hermesExecute to inject a safe prompt template when the user has not
+ * configured a custom one. The default template in hermes-paperclip-adapter
+ * uses `curl | python3 -c "..."` which triggers Hermes's Tirith security
+ * scanner and causes commands to be blocked at runtime.
+ */
+function hermesExecute(ctx: AdapterExecutionContext) {
+  const config = ctx.config as Record<string, unknown>;
+  const hasCustomTemplate =
+    typeof config.promptTemplate === "string" && config.promptTemplate.trim().length > 0;
+  if (hasCustomTemplate) return hermesExecuteBase(ctx);
+  return hermesExecuteBase({
+    ...ctx,
+    config: { ...config, promptTemplate: HERMES_SAFE_PROMPT_TEMPLATE },
+  });
+}
+
 import { processAdapter } from "./process/index.js";
 import { httpAdapter } from "./http/index.js";
 
