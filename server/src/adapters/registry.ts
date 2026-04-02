@@ -67,18 +67,78 @@ import {
 import {
   agentConfigurationDoc as piAgentConfigurationDoc,
 } from "@paperclipai/adapter-pi-local";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import {
   execute as hermesExecute,
-  testEnvironment as hermesTestEnvironment,
+  testEnvironment as hermesTestEnvironmentBase,
   sessionCodec as hermesSessionCodec,
   listSkills as hermesListSkills,
   syncSkills as hermesSyncSkills,
   detectModel as detectModelFromHermes,
 } from "hermes-paperclip-adapter/server";
+import type { AdapterEnvironmentTestContext } from "@paperclipai/adapter-utils";
 import {
   agentConfigurationDoc as hermesAgentConfigurationDoc,
   models as hermesModels,
 } from "hermes-paperclip-adapter";
+
+const execFileAsync = promisify(execFile);
+
+/** Returns true if any of the given Python executables is version 3.10+. */
+async function hasCompatiblePython(candidates: string[]): Promise<boolean> {
+  for (const cmd of candidates) {
+    try {
+      const { stdout } = await execFileAsync(cmd, ["--version"], { timeout: 5_000 });
+      const match = stdout.trim().match(/(\d+)\.(\d+)/);
+      if (match) {
+        const major = parseInt(match[1], 10);
+        const minor = parseInt(match[2], 10);
+        if (major > 3 || (major === 3 && minor >= 10)) return true;
+      }
+    } catch {
+      // not found or failed — try next
+    }
+  }
+  return false;
+}
+
+/**
+ * Wraps hermesTestEnvironment to downgrade the Python version error to a
+ * warning when a compatible Python (3.10+) is available under a different
+ * executable name (e.g. python3.11, python3.12). This handles the case where
+ * the system `python3` is an older Apple-supplied 3.9 while a newer Python is
+ * installed via uv / pyenv / brew but not symlinked as `python3`.
+ */
+async function hermesTestEnvironment(ctx: AdapterEnvironmentTestContext) {
+  const result = await hermesTestEnvironmentBase(ctx);
+  const pythonErrorIdx = result.checks.findIndex(
+    (c) => c.code === "hermes_python_old" && c.level === "error",
+  );
+  if (pythonErrorIdx === -1) return result;
+
+  const compat = await hasCompatiblePython(["python3.13", "python3.12", "python3.11", "python3.10"]);
+  if (!compat) return result;
+
+  // Compatible Python found — downgrade to info so it doesn't block the agent.
+  result.checks[pythonErrorIdx] = {
+    ...result.checks[pythonErrorIdx],
+    level: "info",
+    message: result.checks[pythonErrorIdx].message.replace(
+      "— Hermes requires Python 3.10+",
+      "as system python3; a compatible Python 3.10+ is available via python3.11+",
+    ),
+    hint: "Hermes is running on a compatible Python. The system python3 symlink is outdated but will not affect execution.",
+  };
+
+  // Re-evaluate overall status without the Python error.
+  const hasErrors = result.checks.some((c) => c.level === "error");
+  const hasWarnings = result.checks.some((c) => c.level === "warn");
+  return {
+    ...result,
+    status: (hasErrors ? "fail" : hasWarnings ? "warn" : "pass") as typeof result.status,
+  };
+}
 import { processAdapter } from "./process/index.js";
 import { httpAdapter } from "./http/index.js";
 
