@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { startOllamaProxy } from "./ollama-proxy.js";
 import type { AdapterExecutionContext, AdapterExecutionResult } from "@paperclipai/adapter-utils";
 import type { RunProcessResult } from "@paperclipai/adapter-utils/server-utils";
 import {
@@ -346,6 +347,30 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     graceSec,
     extraArgs,
   } = runtimeConfig;
+
+  // Ollama proxy: if ollamaBaseUrl is configured, start a local Anthropic-compatible
+  // proxy that translates Claude Code API calls to Ollama, then override ANTHROPIC_BASE_URL.
+  const ollamaBaseUrl = asString(config.ollamaBaseUrl, "").trim();
+  const ollamaModel = asString(config.ollamaModel, "llama3.2").trim();
+  let ollamaProxyStop: (() => Promise<void>) | null = null;
+  if (ollamaBaseUrl) {
+    try {
+      const proxy = await startOllamaProxy(ollamaBaseUrl.replace(/\/$/, ""), ollamaModel);
+      ollamaProxyStop = proxy.stop;
+      env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${proxy.port}`;
+      env.ANTHROPIC_API_KEY = "ollama-local";
+      await onLog(
+        "stderr",
+        `[paperclip] Ollama proxy started on port ${proxy.port} → ${ollamaBaseUrl} (model: ${ollamaModel})\n`,
+      );
+    } catch (err) {
+      await onLog(
+        "stderr",
+        `[paperclip] Warning: failed to start Ollama proxy: ${err instanceof Error ? err.message : String(err)}\n`,
+      );
+    }
+  }
+
   const effectiveEnv = Object.fromEntries(
     Object.entries({ ...process.env, ...env }).filter(
       (entry): entry is [string, string] => typeof entry[1] === "string",
@@ -598,5 +623,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     return toAdapterResult(initial, { fallbackSessionId: runtimeSessionId || runtime.sessionId });
   } finally {
     fs.rm(skillsDir, { recursive: true, force: true }).catch(() => {});
+    if (ollamaProxyStop) {
+      ollamaProxyStop().catch(() => {});
+    }
   }
 }

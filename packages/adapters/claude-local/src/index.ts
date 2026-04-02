@@ -28,6 +28,10 @@ Core fields:
 - workspaceStrategy (object, optional): execution workspace strategy; currently supports { type: "git_worktree", baseRef?, branchTemplate?, worktreeParentDir? }
 - workspaceRuntime (object, optional): reserved for workspace runtime metadata; workspace runtime services are manually controlled from the workspace UI and are not auto-started by heartbeats
 
+Ollama backend (optional):
+- ollamaBaseUrl (string, optional): When set, starts a local Anthropic-compatible proxy that translates Claude Code API calls to this Ollama instance (e.g. http://localhost:11434). Claude Code CLI will call the proxy instead of Anthropic.
+- ollamaModel (string, optional): Ollama model to use when ollamaBaseUrl is set (e.g. llama3.2, qwen2.5-coder, mistral). Defaults to llama3.2.
+
 Operational fields:
 - timeoutSec (number, optional): run timeout in seconds
 - graceSec (number, optional): SIGTERM grace period in seconds

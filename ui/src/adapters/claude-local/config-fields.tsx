@@ -70,6 +70,60 @@ export function ClaudeLocalConfigFields({
   );
 }
 
+const ollamaUrlHint =
+  "Optional: Ollama server URL (e.g. http://localhost:11434). When set, Claude Code will use this local Ollama model as its backend instead of Anthropic.";
+const ollamaModelHint =
+  "Ollama model name to use (e.g. llama3.2, qwen2.5-coder, mistral). Only applies when an Ollama URL is configured.";
+
+export function ClaudeLocalOllamaFields({
+  isCreate,
+  values,
+  set,
+  config,
+  eff,
+  mark,
+}: AdapterConfigFieldsProps) {
+  const valuesEx = values as (typeof values & { ollamaBaseUrl?: string; ollamaModel?: string }) | null;
+  return (
+    <>
+      <Field label="Ollama server URL" hint={ollamaUrlHint}>
+        <DraftInput
+          value={
+            isCreate
+              ? valuesEx?.ollamaBaseUrl ?? ""
+              : eff("adapterConfig", "ollamaBaseUrl", String(config.ollamaBaseUrl ?? ""))
+          }
+          onCommit={(v) =>
+            isCreate
+              ? set!({ ...values, ollamaBaseUrl: v } as never)
+              : mark("adapterConfig", "ollamaBaseUrl", v || undefined)
+          }
+          immediate
+          className={inputClass}
+          placeholder="http://localhost:11434"
+        />
+      </Field>
+      <Field label="Ollama model" hint={ollamaModelHint}>
+        <DraftInput
+          value={
+            isCreate
+              ? valuesEx?.ollamaModel ?? ""
+              : eff("adapterConfig", "ollamaModel", String(config.ollamaModel ?? ""))
+          }
+          onCommit={(v) =>
+            isCreate
+              ? set!({ ...values, ollamaModel: v } as never)
+              : mark("adapterConfig", "ollamaModel", v || undefined)
+          }
+          immediate
+          className={inputClass}
+          placeholder="llama3.2"
+        />
+      </Field>
+    </>
+  );
+}
+
 export function ClaudeLocalAdvancedFields({
   isCreate,
   values,
