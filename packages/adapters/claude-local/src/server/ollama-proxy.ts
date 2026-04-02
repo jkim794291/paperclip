@@ -70,6 +70,16 @@ interface OllamaResponse {
 
 // ─── Conversion helpers ────────────────────────────────────────────────────────
 
+function parseToolArgs(args: unknown): Record<string, unknown> {
+  if (typeof args === "string") {
+    try { return JSON.parse(args) as Record<string, unknown>; } catch { return { _raw: args }; }
+  }
+  if (typeof args === "object" && args !== null && !Array.isArray(args)) {
+    return args as Record<string, unknown>;
+  }
+  return {};
+}
+
 function contentToString(content: string | AnthropicContentBlock[]): string {
   if (typeof content === "string") return content;
   return content
@@ -137,7 +147,7 @@ function ollamaMessageToAnthropicContent(msg: OllamaMessage): AnthropicContentBl
         type: "tool_use",
         id: `toolu_${Math.random().toString(36).slice(2, 10)}`,
         name: tc.function.name,
-        input: tc.function.arguments,
+        input: parseToolArgs(tc.function.arguments),
       });
     }
   }
@@ -185,8 +195,6 @@ async function streamOllamaToAnthropic(
   res: http.ServerResponse,
 ): Promise<void> {
   const msgId = `msg_${Math.random().toString(36).slice(2, 16)}`;
-  let inputTokens = 0;
-  let outputTokens = 0;
 
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
@@ -194,7 +202,6 @@ async function streamOllamaToAnthropic(
     Connection: "keep-alive",
   });
 
-  // Send message_start
   res.write(
     sseEvent("message_start", {
       type: "message_start",
@@ -209,19 +216,9 @@ async function streamOllamaToAnthropic(
       },
     }),
   );
-
-  // content_block_start for text
-  res.write(
-    sseEvent("content_block_start", {
-      type: "content_block_start",
-      index: 0,
-      content_block: { type: "text", text: "" },
-    }),
-  );
   res.write(sseEvent("ping", { type: "ping" }));
 
-  let accumulatedText = "";
-
+  // ── Fetch from Ollama ──────────────────────────────────────────────────────
   const ollamaRes = await fetch(`${ollamaBaseUrl}/api/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -230,112 +227,82 @@ async function streamOllamaToAnthropic(
 
   if (!ollamaRes.ok || !ollamaRes.body) {
     const errText = await ollamaRes.text().catch(() => "");
-    res.write(
-      sseEvent("content_block_delta", {
-        type: "content_block_delta",
-        index: 0,
-        delta: { type: "text_delta", text: `[Ollama error ${ollamaRes.status}: ${errText}]` },
-      }),
-    );
+    process.stderr.write(`[ollama-proxy] Ollama error ${ollamaRes.status}: ${errText}\n`);
+    res.write(sseEvent("content_block_start", { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }));
+    res.write(sseEvent("content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: `[Ollama error ${ollamaRes.status}: ${errText}]` } }));
     res.write(sseEvent("content_block_stop", { type: "content_block_stop", index: 0 }));
-    res.write(
-      sseEvent("message_delta", {
-        type: "message_delta",
-        delta: { stop_reason: "end_turn", stop_sequence: null },
-        usage: { output_tokens: 1 },
-      }),
-    );
+    res.write(sseEvent("message_delta", { type: "message_delta", delta: { stop_reason: "end_turn", stop_sequence: null }, usage: { output_tokens: 1 } }));
     res.write(sseEvent("message_stop", { type: "message_stop" }));
     res.end();
     return;
   }
 
+  // ── Stream Ollama NDJSON, accumulate text and final message ────────────────
   const reader = ollamaRes.body.getReader();
   const decoder = new TextDecoder();
   let lastOllamaMsg: OllamaMessage | null = null;
+  let outputTokens = 0;
+
+  // We need to collect whether there's text before opening the text block,
+  // because if the model only returns tool_calls we skip the text block entirely.
+  // Strategy: buffer all NDJSON lines, process after reading is complete.
+  const lines: OllamaResponse[] = [];
 
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
-
     const chunk = decoder.decode(value, { stream: true });
     for (const rawLine of chunk.split("\n")) {
       const line = rawLine.trim();
       if (!line) continue;
-
-      let parsed: OllamaResponse;
-      try {
-        parsed = JSON.parse(line) as OllamaResponse;
-      } catch {
-        continue;
-      }
-
-      if (parsed.prompt_eval_count) inputTokens = parsed.prompt_eval_count;
-      if (parsed.eval_count) outputTokens = parsed.eval_count;
-
-      const delta = parsed.message?.content ?? "";
-      if (delta) {
-        accumulatedText += delta;
-        res.write(
-          sseEvent("content_block_delta", {
-            type: "content_block_delta",
-            index: 0,
-            delta: { type: "text_delta", text: delta },
-          }),
-        );
-      }
-
-      if (parsed.done) {
-        lastOllamaMsg = parsed.message;
-      }
+      try { lines.push(JSON.parse(line) as OllamaResponse); } catch { /* skip */ }
     }
   }
 
-  // Handle tool calls (usually in the final message)
-  let finalStopReason = "end_turn";
-  let blockIndex = 1;
-
-  if (lastOllamaMsg?.tool_calls && lastOllamaMsg.tool_calls.length > 0) {
-    finalStopReason = "tool_use";
-    for (const tc of lastOllamaMsg.tool_calls) {
-      const toolId = `toolu_${Math.random().toString(36).slice(2, 10)}`;
-      res.write(
-        sseEvent("content_block_start", {
-          type: "content_block_start",
-          index: blockIndex,
-          content_block: { type: "tool_use", id: toolId, name: tc.function.name, input: {} },
-        }),
-      );
-      res.write(
-        sseEvent("content_block_delta", {
-          type: "content_block_delta",
-          index: blockIndex,
-          delta: {
-            type: "input_json_delta",
-            partial_json: JSON.stringify(tc.function.arguments),
-          },
-        }),
-      );
-      res.write(
-        sseEvent("content_block_stop", { type: "content_block_stop", index: blockIndex }),
-      );
-      blockIndex++;
-    }
+  // Collect text deltas and final message
+  const textDeltas: string[] = [];
+  for (const parsed of lines) {
+    if (parsed.eval_count) outputTokens = parsed.eval_count;
+    const delta = parsed.message?.content ?? "";
+    if (delta) textDeltas.push(delta);
+    if (parsed.done) lastOllamaMsg = parsed.message;
   }
 
-  res.write(sseEvent("content_block_stop", { type: "content_block_stop", index: 0 }));
-  res.write(
-    sseEvent("message_delta", {
-      type: "message_delta",
-      delta: { stop_reason: finalStopReason, stop_sequence: null },
-      usage: { output_tokens: outputTokens },
-    }),
+  const hasText = textDeltas.length > 0;
+  const toolCalls = lastOllamaMsg?.tool_calls ?? [];
+  const hasToolCalls = toolCalls.length > 0;
+
+  process.stderr.write(
+    `[ollama-proxy] response: hasText=${hasText} toolCalls=${toolCalls.length} outputTokens=${outputTokens}\n`,
   );
+
+  let blockIndex = 0;
+
+  // ── 1. Text block (only if there is text) ─────────────────────────────────
+  if (hasText) {
+    res.write(sseEvent("content_block_start", { type: "content_block_start", index: blockIndex, content_block: { type: "text", text: "" } }));
+    for (const delta of textDeltas) {
+      res.write(sseEvent("content_block_delta", { type: "content_block_delta", index: blockIndex, delta: { type: "text_delta", text: delta } }));
+    }
+    res.write(sseEvent("content_block_stop", { type: "content_block_stop", index: blockIndex }));
+    blockIndex++;
+  }
+
+  // ── 2. Tool call blocks (AFTER text block is fully closed) ────────────────
+  for (const tc of toolCalls) {
+    const toolId = `toolu_${Math.random().toString(36).slice(2, 10)}`;
+    const argsObj = parseToolArgs(tc.function.arguments);
+    res.write(sseEvent("content_block_start", { type: "content_block_start", index: blockIndex, content_block: { type: "tool_use", id: toolId, name: tc.function.name, input: {} } }));
+    res.write(sseEvent("content_block_delta", { type: "content_block_delta", index: blockIndex, delta: { type: "input_json_delta", partial_json: JSON.stringify(argsObj) } }));
+    res.write(sseEvent("content_block_stop", { type: "content_block_stop", index: blockIndex }));
+    blockIndex++;
+  }
+
+  // ── 3. End stream ──────────────────────────────────────────────────────────
+  const finalStopReason = hasToolCalls ? "tool_use" : "end_turn";
+  res.write(sseEvent("message_delta", { type: "message_delta", delta: { stop_reason: finalStopReason, stop_sequence: null }, usage: { output_tokens: outputTokens } }));
   res.write(sseEvent("message_stop", { type: "message_stop" }));
   res.end();
-
-  void accumulatedText; // suppress unused warning
-  void inputTokens;
 }
 
 // ─── Request handler ───────────────────────────────────────────────────────────
@@ -361,6 +328,10 @@ async function handleMessagesRequest(
     tools: anthropicToolsToOllama(req.tools),
     stream: req.stream ?? false,
   };
+
+  process.stderr.write(
+    `[ollama-proxy] → ${req.model} stream=${req.stream ?? false} msgs=${ollamaReq.messages.length} tools=${ollamaReq.tools?.length ?? 0}\n`,
+  );
 
   if (req.stream) {
     await streamOllamaToAnthropic(ollamaBaseUrl, ollamaReq, req.model, res);
